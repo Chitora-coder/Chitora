@@ -1,0 +1,24 @@
+{
+    "name": "ai-assistant-mcq",
+    "version": "2.0.0",
+    "description": "MCQ AI Assistant with Screen Capture Protection",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron .",
+        "build": "electron-builder"
+    },
+    "dependencies": {
+        "electron": "^28.0.0",
+        "axios": "^1.6.0"
+    },
+    "devDependencies": {
+        "electron-builder": "^24.9.0"
+    },
+    "build": {
+        "appId": "com.aiassistant.mcq",
+        "win": {
+            "target": "nsis",
+            "icon": "icon.ico"
+        }
+    }
+}

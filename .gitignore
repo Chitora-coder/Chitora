@@ -1,0 +1,33 @@
+# Folders to completely ignore
+**/venv/
+**/env/
+**/node_modules/
+**/__pycache__/
+**/.agent/
+**/.git/
+**/build/
+**/build_v2/
+
+# File types to ignore globally
+*.py[cod]
+*$py.class
+*.so
+*.manifest
+*.log
+.DS_Store
+Thumbs.db
+
+# Private files
+.env
+
+# ==========================================
+# EXCEPTIONS - Force include these
+# ==========================================
+
+# Include DIST folders (binaries)
+!**/dist/**
+!**/dist_v2/**
+
+# Include specific important files that might be ignored by global rules
+!**/*.spec
+!**/*.exe
