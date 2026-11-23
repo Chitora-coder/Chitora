@@ -23,12 +23,12 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-# Use Gemini 3 Pro (latest model, released Nov 2025)
-MODEL_NAME = "gemini-3-pro-preview" 
+# Models with fallback
+MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"] 
 
 def get_answer_from_image(image):
     """
-    Sends the image to Gemini 3 Pro to detect and answer C programming questions.
+    Sends the image to Gemini to detect and answer C programming questions.
     """
     import re
     
@@ -48,28 +48,32 @@ def get_answer_from_image(image):
             
         return "NO_QUESTION_FOUND"
 
-    try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        
-        prompt = """
-        You are an ELITE Multi-Domain Expert.
-        
-        TASK: Solve the question in this screenshot.
-        
-        CRITICAL OUTPUT RULES:
-        - MCQ Question → Return ONLY the letter (A, B, C, or D)
-        - Calculation/Problem → Return ONLY the final answer
-        - True/False → Return ONLY "True" or "False"
-        - NEVER include explanations, reasoning, or context
-        - NEVER include "QUES:", "Ans:", etc.
-        
-        Return NO_QUESTION_FOUND if no question exists.
-        """
-        
-        response = model.generate_content([prompt, image])
-        return clean_response(response.text)
-    except Exception as e:
-        return f"Error: {str(e)}"
+    prompt = """
+    You are an ELITE Multi-Domain Expert.
+    
+    TASK: Solve the question in this screenshot.
+    
+    CRITICAL OUTPUT RULES:
+    - MCQ Question → Return ONLY the letter (A, B, C, or D)
+    - Calculation/Problem → Return ONLY the final answer
+    - True/False → Return ONLY "True" or "False"
+    - NEVER include explanations, reasoning, or context
+    - NEVER include "QUES:", "Ans:", etc.
+    
+    Return NO_QUESTION_FOUND if no question exists.
+    """
+
+    for model_name in MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                [prompt, image],
+                request_options={'timeout': 110}
+            )
+            return clean_response(response.text)
+        except Exception:
+            continue
+    return "NO_QUESTION_FOUND"
 
 if __name__ == "__main__":
     # Mock test if needed

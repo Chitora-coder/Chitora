@@ -1,5 +1,7 @@
 import os
 import sys
+import time
+import itertools
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -7,104 +9,153 @@ from dotenv import load_dotenv
 if getattr(sys, 'frozen', False):
     application_path = os.path.dirname(sys.executable)
 else:
-    # If imported by backend_server.py in a subfolder, we want the folder where ai_engine_v2.py lives
     application_path = os.path.dirname(os.path.abspath(__file__))
 
 dotenv_path = os.path.join(application_path, '.env')
 if not os.path.exists(dotenv_path):
-    # Fallback to current working directory if not found next to script
     dotenv_path = os.path.join(os.getcwd(), '.env')
 
 load_dotenv(dotenv_path)
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+# --- HTTP Proxy support ---
+# Set HTTP_PROXY in .env to route all Gemini requests through a different IP.
+# e.g: HTTP_PROXY=http://127.0.0.1:7890  (your VPN/proxy local port)
+_proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+if _proxy:
+    os.environ["HTTP_PROXY"] = _proxy
+    os.environ["HTTPS_PROXY"] = _proxy
+    print(f"Routing API requests via proxy: {_proxy}")
 
-if not API_KEY:
-    print(f"CRITICAL ERROR: GEMINI_API_KEY not found. Looked in: {dotenv_path}")
+# --- Multi-key rotation support ---
+# Add GEMINI_API_KEY_2, GEMINI_API_KEY_3 etc. in .env for parallel key pools
+def _load_api_keys():
+    keys = []
+    primary = os.getenv("GEMINI_API_KEY")
+    if primary:
+        keys.append(primary)
+    for i in range(2, 10):
+        k = os.getenv(f"GEMINI_API_KEY_{i}")
+        if k:
+            keys.append(k)
+    return keys
+
+API_KEYS = _load_api_keys()
+_current_key_index = 0
+
+if not API_KEYS:
+    print(f"CRITICAL ERROR: No GEMINI_API_KEY found in: {dotenv_path}")
 else:
-    print(f"API Key loaded from: {dotenv_path}")
+    print(f"Loaded {len(API_KEYS)} API key(s). Proxy: {'YES' if _proxy else 'NO (direct IP)'}")
 
-try:
-    genai.configure(api_key=API_KEY)
-except Exception as e:
-    print(f"GenAI Configuration Error: {e}")
+def _next_key():
+    global _current_key_index
+    if not API_KEYS:
+        return None
+    key = API_KEYS[_current_key_index % len(API_KEYS)]
+    _current_key_index += 1
+    return key
 
-# Using Gemini 2.5 Pro as Primary and Gemini 3 as Fallback
-PRIMARY_MODEL = "gemini-2.5-pro" 
-FALLBACK_MODEL = "gemini-3-pro-preview"
+MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-flash-latest",
+]
+
+# Backoff schedule for IP-level rate limits (seconds):
+# First hit → wait 15s, second → 30s, third → 60s, then cap at 60s
+BACKOFF_SCHEDULE = [15, 30, 60, 60]
+_rate_limit_hit_count = 0
 
 def get_answer_from_image(image):
     """
-    Sends the image to Gemini 3 Pro to solve C programming MCQ or coding questions.
+    Sends the image to Gemini. On IP-level rate limit (429), uses
+    exponential backoff and retries automatically.
     """
-    prompt = """
-    You are an Elite Academic and Industry Expert across all domains.
-    
-    TASK:
-    1. Analyze the question (MCQ, calculation, or short answer) found in this screenshot.
-    2. Solve it step-by-step mentally with absolute precision.
-    
-    CRITICAL OUTPUT RULE:
-    - If it's an MCQ, return ONLY the correct letter(s): A, B, C, or D.
-    - If it's a calculation or short answer, return ONLY the final result.
-    - If multiple answers are correct, return them separated by commas (e.g., A, C).
-    - Do NOT include "The answer is", "QUES:", "Ans:", or any explanations.
-    - If no question is found, return "NO_QUESTION".
-    """
-    
     import re
+    global _rate_limit_hit_count
 
     def clean_response(text):
         t = text.strip().upper()
-        # Remove common prefixes
         t = re.sub(r'^(QUES|ANS|ANSWER|OPTION|THE CORRECT OPTION IS|OUTPUT|RESULT)[:\s]*', '', t)
-        
-        # Check for multiple letters (Multi-correct)
-        letters = re.findall(r'\b([A-D])\b', t)
-        if letters:
-            # If we found multiple letters, join them with commas
-            # Remove duplicates while preserving order
-            seen = set()
-            unique_letters = [x for x in letters if not (x in seen or seen.add(x))]
-            return ", ".join(unique_letters)
-            
-        # If no letters, but the response is short (like a number or code snippet)
-        if len(t) < 30: 
+        matches = re.findall(r'\b([A-D])\b', t)
+        if matches:
+            unique = list(dict.fromkeys(matches))
+            return ", ".join(unique)
+        if len(t) < 30:
             return t
-            
         return "NO_QUESTION"
 
-    # Try primary model first
-    try:
-        print(f"Trying model: {PRIMARY_MODEL}")
-        model = genai.GenerativeModel(PRIMARY_MODEL)
-        response = model.generate_content(
-            [prompt, image],
-            request_options={'timeout': 110} # Increased to 110s as requested
-        )
-        answer = clean_response(response.text)
-        print(f"Final Answer: {answer}")
-        return answer
-        
-    except Exception as e:
-        print(f"Primary model failed: {e}")
-        
-        # Fallback to stable model
-        try:
-            print(f"Trying fallback model: {FALLBACK_MODEL}")
-            model = genai.GenerativeModel(FALLBACK_MODEL)
-            response = model.generate_content(
-                [prompt, image],
-                request_options={'timeout': 110} # Increased to 110s as requested
-            )
-            answer = clean_response(response.text)
-            print(f"Final Answer (Fallback): {answer}")
-            return answer
-            
-        except Exception as e2:
-            print(f"Fallback model also failed: {e2}")
-            return "ERROR"
+    prompt = """
+    You are an ELITE Multi-Domain Expert.
+
+    TASK: Look at the screenshot. You will see a RED CIRCLE drawn on the image.
+    Identify and solve ONLY the specific question that is located immediately next to or inside that red circle. Ignore all other questions on the screen.
+
+    CRITICAL OUTPUT RULES:
+    - Single-answer MCQ (radio buttons) → Return ONLY the letter (A, B, C, or D)
+    - Multi-correct MCQ (checkboxes / "select all that apply") → Return ALL correct letters comma-separated (e.g. A, C, D)
+    - Calculation/Problem → Return ONLY the final answer
+    - True/False → Return ONLY "True" or "False"
+    - Fill in the blank → Return ONLY the answer word/number
+    - NEVER include explanations, reasoning, or context
+    - NEVER include "QUES:", "Ans:", etc.
+
+    Return NO_QUESTION if no question exists near the red circle.
+    """
+
+    tried_models = set()
+    for model_name in MODELS:
+        if model_name in tried_models:
+            continue
+
+        for key_attempt in range(max(1, len(API_KEYS))):
+            api_key = _next_key()
+            try:
+                print(f"Trying: {model_name} | key ...{api_key[-6:] if api_key else 'N/A'}")
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    [prompt, image],
+                    request_options={'timeout': 110}
+                )
+                answer = clean_response(response.text)
+                _rate_limit_hit_count = 0  # reset on success
+                print(f"Final Answer: {answer}")
+                return answer
+
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
+                    wait = BACKOFF_SCHEDULE[min(_rate_limit_hit_count, len(BACKOFF_SCHEDULE) - 1)]
+                    _rate_limit_hit_count += 1
+                    print(f"IP rate-limited (hit #{_rate_limit_hit_count}). Waiting {wait}s before retry...")
+                    time.sleep(wait)
+                    # After waiting, retry same model — IP block should lift
+                    try:
+                        genai.configure(api_key=api_key)
+                        model = genai.GenerativeModel(model_name)
+                        response = model.generate_content(
+                            [prompt, image],
+                            request_options={'timeout': 110}
+                        )
+                        answer = clean_response(response.text)
+                        _rate_limit_hit_count = 0
+                        print(f"Retry succeeded. Final Answer: {answer}")
+                        return answer
+                    except Exception as retry_e:
+                        print(f"Retry also failed: {retry_e}")
+                        return "RATE_LIMIT"
+                elif "404" in err_str or "not found" in err_str.lower():
+                    print(f"Model {model_name} unavailable, skipping.")
+                    tried_models.add(model_name)
+                    break
+                else:
+                    print(f"{model_name} error: {e}")
+
+    return "RATE_LIMIT" if _rate_limit_hit_count > 0 else "ERROR"
 
 if __name__ == "__main__":
-    # Mock test if needed
+    pass
+
+if __name__ == "__main__":
     pass

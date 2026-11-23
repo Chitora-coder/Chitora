@@ -17,9 +17,6 @@
 .DS_Store
 Thumbs.db
 
-# Private files
-.env
-
 # ==========================================
 # EXCEPTIONS - Force include these
 # ==========================================
@@ -31,3 +28,10 @@ Thumbs.db
 # Include specific important files that might be ignored by global rules
 !**/*.spec
 !**/*.exe
+
+# Private files (must come after !dist to ensure .env is never tracked)
+**/.env
+.env
+dist/.env
+dist_v2/.env
+
